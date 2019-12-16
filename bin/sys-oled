@@ -5,40 +5,84 @@ import os
 import sys
 import time
 import psutil
+import math
 import configparser
 from datetime import datetime
 from luma.core import cmdline, error
 from PIL import Image, ImageDraw, ImageFont
 
 
-# Load presets
+# Set defaults for configuration values
 contrast = 255
 refresh = 10
-show_logo = 'yes'
-net_name =  'eth0'
-s1_name = 'sd'
-s1_path = '/'
+show_logo = False
+show_information = True
+show_processor = True
+show_board = True
+show_network = True
+show_rates = True
+show_status = True
+show_storage = True
+logo_file = 'helios4_logo.png'
+use_centigrade = False
+interface =  'eth0'
+storage = []
+
+
+# Initialize constant variables
+host_name = os.uname()[1]
+
+
+#
+# Translate a string to a boolean
+#
+
+def as_boolean(string):
+    return string.lower() in ['true', 't', 'yes', 'y', '1']
+
 
 # Load config file
 config_file = '/etc/sys-oled.conf'
 if os.path.isfile(config_file):
-    config = configparser.ConfigParser()
-    config.read(config_file)
-    contrast = int(config.get('main', 'contrast'))
-    refresh = float(config.get('main', 'refresh'))
-    show_logo = config.get('main', 'show_logo')
-    net_name = config.get('device', 'network_name')
-    s1_name = config.get('device', 'storage1_name')
-    s1_path = config.get('device', 'storage1_path')
-    if config.has_option('device', 'storage2_name'):
-        s2_name = config.get('device', 'storage2_name')
-        s2_path = config.get('device', 'storage2_path')
+
+    configuration = configparser.ConfigParser(allow_no_value=True)
+    configuration.read(config_file)
+
+    contrast = configuration.getint('main', 'contrast', fallback=255)
+    refresh = configuration.getfloat('main', 'refresh', fallback=5)
+    use_centigrade = configuration.getboolean('main', 'centigrade', fallback=False)
+    logo_file = configuration.get('main', 'logo_file', fallback='helios4_logo.png')
+    show_information = configuration.getboolean('main', 'show_information', fallback=True)
+    show_board = configuration.getboolean('main', 'show_board', fallback=True)
+    show_logo = configuration.getboolean('main', 'show_logo', fallback=False)
+    show_network = configuration.getboolean('main', 'show_network', fallback=True)
+    show_processor = configuration.getboolean('main', 'show_processor', fallback=True)
+    show_rates = configuration.getboolean('main', 'show_rates', fallback=True)
+    show_status = configuration.getboolean('main', 'show_status', fallback=True)
+    show_storage = configuration.getboolean('main', 'show_storage', fallback=True)
+
+    interface = configuration.get('network', 'interface', fallback='eth0')
+
+    for entry in configuration.options('storage'):
+        path = ' '.join(entry.split()).split()
+        storage.append({'path':  path[0], 'name': path[1] if len(path) > 1 else path[0]})
 
 
-# Load font
+#
+# Load font, sizes, and related variables
+#
+
 font_path = os.path.abspath(os.path.join(os.path.dirname(__file__),
-                                '../share/sys-oled', 'C&C Red Alert [INET].ttf'))
-font = ImageFont.truetype(font_path, 12)
+                            '../share/sys-oled', 'C&C Red Alert [INET].ttf'))
+font   = ImageFont.truetype(font_path, 12)
+font16 = ImageFont.truetype(font_path, 16)
+
+#
+# Display 1.28" OLED Module - 128x64
+#
+
+resolution = (128, 64)
+last = resolution[1] - 12   # Define bottom line (font 12)
 
 
 def get_device(actual_args=None):
@@ -58,6 +102,7 @@ def get_device(actual_args=None):
 
     return device
 
+
 def bytes2human(n):
     symbols = ('K', 'M', 'G', 'T', 'P', 'E', 'Z', 'Y')
     prefix = {}
@@ -67,70 +112,384 @@ def bytes2human(n):
         if n >= prefix[s]:
             value = float(n) / prefix[s]
             if s in ['K', 'M']:
-                return '%d%s' % (int(value), s)
+                return '{}{}'.format(int(value), s)
             else:
-                return '%.1f%s' % (value, s)
-    return "%sB" % n
+                return '{:.1f}{}'.format(value, s)
+    return '{}B'.format(n)
 
 
-def cpu_usage():
-    uptime = datetime.now().replace(second=0, microsecond=0) - datetime.fromtimestamp(psutil.boot_time())
+#
+# Convert time of day into a string to be displayed
+#
+
+def host_time(time_only = False):
+    now = datetime.now()
+    if time_only:
+        time = now.strftime('%H:%M:%S')
+    else:
+        time = now.strftime('%Y-%m-%d %H:%M')
+    return time
+
+
+#
+# Convert temperature to a string in the desired units
+#
+
+def convert_temperature(temperature):
+    if not use_centigrade:
+        temperature = (temperature * (9.0 / 5.0)) + 32.0
+    return '{:.1f} {}'.format(temperature, 'C' if use_centigrade else 'F')
+
+
+#
+# Get processor utilization percentage
+#
+
+def cpu_utilization():
+    utilization = psutil.cpu_percent(interval=1)
+    return 'Util: {:.0f}%'.format(utilization)
+
+
+#
+# Format CPU uptime similar to the up time from the matching command.
+#
+
+def cpu_uptime(days=True):
+    now = datetime.now().replace(microsecond=0)
+    uptime = now - datetime.fromtimestamp(psutil.boot_time())
+    if days:
+        uptime = str(uptime)
+    else:
+        uptime = str(uptime).split(',')[0]
+    return 'Up: {}'.format(uptime[:-3])
+
+
+#
+# Format an abbreviated CPU load averages ans uptime
+#
+
+def cpu_load():
+    now = datetime.now().replace(second=0, microsecond=0)
     av1, av2, av3 = os.getloadavg()
-    return "ld: %.1f %.1f %.1f up: %s" \
-        % (av1, av2, av3, str(uptime).split(',')[0][:-3])
+    return 'Load: {:.1f} {:.1f} {:.1f}'.format(av1, av2, av3)
 
 
-def mem_usage():
-    usage = psutil.virtual_memory()
-    return "mem: %s / %s - %.0f%%" \
-        % (bytes2human(usage.used), bytes2human(usage.total), usage.percent)
+#
+# Compute the CPU utilization as bar on the display
+#
+
+def cpu_utilizationBar(low, high):
+    low = low + 1
+    load = psutil.cpu_percent(interval=0.5)
+    length = low + int(math.ceil(load * (high - low) / 100))
+    return length
+
+
+#
+# Compute the memory utilization as bar on the display
+#
+
+def memory_utilizationBar(low, high):
+    low = low + 1
+    memory = psutil.virtual_memory()
+    percentage = (memory.used * 100) / memory.total
+    length = low + int(math.ceil(percentage * (high - low) / 100))
+    return length
+
+
+def memory_usage():
+    memory = psutil.virtual_memory()
+    used = bytes2human(memory.used)
+    total = bytes2human(memory.total)
+    percent = memory.percent
+    return 'Mem: {} / {} - {:.0f}%'.format(used, total, percent)
+
+
+#
+# Compute the swap utilization as bar on the display
+#
+
+def swap_utilizationBar(low, high):
+    low = low + 1
+    swap = psutil.swap_memory()
+    length = 0
+    if swap.percent > 0.0:
+        length = low + int(math.ceil(swap.percent * (high - low) / 100))
+    return length
 
 
 def disk_usage(name, dir):
-    usage = psutil.disk_usage(dir)
-    return name + ": %s / %s - %.0f%%" \
-        % (bytes2human(usage.used), bytes2human(usage.total), usage.percent)
+    utilization = psutil.disk_usage(dir)
+    used = bytes2human(utilization.used)
+    total = bytes2human(utilization.total)
+    percent = utilization.percent
+    return '{}: {} / {} - {:.0f}%'.format(name, used, total, percent)
 
 
-def network(iface):
-    addr = psutil.net_if_addrs()[iface]
-    return "%s: %s" \
-        % (iface, addr[0].address)
+def processor_status(device):
 
-def host_time():
-    now = datetime.now()
-    hostname = os.uname()[1]
-    return hostname + " " + now.strftime("%Y-%m-%d %H:%M")
+    cpu = cpu_utilizationBar(36, resolution[0])
+    memory = memory_utilizationBar(36, resolution[0])
+    swap = swap_utilizationBar(36, resolution[0])
 
-def display_info(device):
+    now = host_time()
+
     txt = Image.new('RGBA', device.size)
     d = ImageDraw.Draw(txt)
-    d.text((0, 0), cpu_usage(), font=font, fill="white")
-    d.line([(0,13),(128,13)])
-    d.text((0, 15), mem_usage(), font=font, fill="white")
-    d.text((0, 27), disk_usage(s1_name, s1_path), font=font, fill="white")
-    if 's2_name' in globals():
-        d.text((0, 39), disk_usage(s2_name, s2_path), font=font, fill="white")
-        d.text((0, 51), network(net_name), font=font, fill="white")
-    else:
-        d.text((0, 39), network(net_name), font=font, fill="white")
+    d.text((0, 0), host_name, font=font16, fill='white')
+    d.line([(0, 13), (resolution[0], 13)])
+    d.text((0, 15), 'CPU:', font=font, fill='white')
+    d.line([(36, 20), (cpu, 20)], width=7)
+    d.text((0, 28), 'Mem:', font=font, fill='white')
+    d.line([(36, 33), (memory, 33)], width=7)
+    d.text((0, 40), 'Swap:', font=font, fill='white')
+    if swap > 0:
+        d.line([(36, 45), (memory, 45)], width=7)
+    d.text((0, last), now, font=font, fill='white')
     device.display(txt.convert(device.mode))
 
 
-def logo(device, msg):
-    img_path = os.path.abspath(os.path.join(os.path.dirname(__file__),
-        '../share/sys-oled', 'helios4_logo.png'))
-    logo = Image.open(img_path).convert("RGBA")
+#
+# Get the IPv4 address for the interface
+#
 
-    background = Image.new("RGBA", device.size)
+def network_ipaddr(iface):
+    addr = psutil.net_if_addrs()[iface]
+    return '{}'.format(addr[0].address)
+
+def network(iface):
+    return '{}: {}'.format(iface, network_ipaddr(iface))
+
+
+#
+# Extract the network interface statistics
+#
+
+def interface_statistics(iface):
+    data = psutil.net_io_counters(pernic=True)
+    (bytes_sent, bytes_recv,
+     packets_sent, packets_recv,
+     errin, errout,
+     dropin, dropout) = data[iface]
+    return (bytes_sent, bytes_recv,
+            packets_sent, packets_recv,
+            errin, errout,
+            dropin, dropout)
+
+def network_traffic():
+    start = interface_statistics(interface)
+    time.sleep(1.0)
+    end = interface_statistics(interface)
+
+    bytes_sent = float(end[0]) - float(start[0])
+    bytes_recv = float(end[1]) - float(start[1])
+    packets_sent = float(end[2]) - float(start[2])
+    packets_recv = float(end[3]) - float(start[3])
+    errin = float(end[4]) - float(start[4])
+    errout = float(end[5]) - float(start[5])
+    dropin = float(end[6]) - float(start[6])
+    dropout = float(end[7]) - float(start[7])
+
+    return (bytes_sent, bytes_recv,
+            packets_sent, packets_recv,
+            errin, errout,
+            dropin, dropout)
+
+
+net_max = 1000
+
+def network_utilization(device):
+    global net_max
+
+    traffic = network_traffic()
+    txCount = traffic[0]
+    rxCount = traffic[1]
+    net_max = max(net_max, txCount, rxCount)
+
+    txPercent = (txCount / net_max) * 100
+    rxPercent = (rxCount / net_max) * 100
+
+    low = 24 + 1
+    high = resolution[0]
+    tx = low + int(txPercent * (high - low) / 100.0)
+    rx = low + int(rxPercent * (high - low) / 100.0)
+
+    now = host_time()
+
+    txt = Image.new('RGBA', device.size)
+    d = ImageDraw.Draw(txt)
+    d.text((0, 0), '{}: Utilization'.format(interface), font=font16, fill='white')
+    d.line([(0, 13), (resolution[0], 13)])
+    d.text((0, 18), 'Tx:', font=font, fill='white')
+    d.line([(24, 24), (tx, 24)], width=7)
+    d.text((0, 30), 'Rx:', font=font, fill='white')
+    d.line([(24, 36), (rx, 36)], width=7)
+    d.text((36, 41), '{:.0f} bytes'.format(net_max), font=font, fill='white')
+    d.text((0, last), now, font=font, fill='white')
+    device.display(txt.convert(device.mode))
+
+
+def interface_rates(device):
+
+    now = host_time()
+
+    (bytes_sent, bytes_recv,
+     packets_sent, packets_recv,
+     errin, errout,
+     dropin, dropout) = network_traffic()
+    bytes = '{} / {}'.format(bytes_sent, bytes_recv)
+    packets = '{} / {}'.format(packets_sent, packets_recv)
+    errors = '{} / {}'.format(errin, errout)
+    dropped = '{} / {}'.format(dropin, dropout)
+
+    txt = Image.new('RGBA', device.size)
+    d = ImageDraw.Draw(txt)
+    d.text((0, 0), '{}: Per Second'.format(interface), font=font16, fill='white')
+    d.line([(0, 13), (resolution[0], 13)])
+    d.text((0, 18), 'Bytes:', font=font, fill='white')
+    d.text((50, 18), bytes, font=font, fill='white')
+    d.text((0, 30), 'Packets:', font=font, fill='white')
+    d.text((50, 30), packets, font=font, fill='white')
+    d.text((0, 42), 'Errors:', font=font, fill='white')
+    d.text((50, 42), errors, font=font, fill='white')
+    d.text((0, 54), 'Dropped:', font=font, fill='white')
+    d.text((50, 54), dropped, font=font, fill='white')
+    #d.text((0, last), now, font=font, fill='white')
+    device.display(txt.convert(device.mode))
+
+
+#
+# Display the status of the system
+#
+
+def system_status(device):
+    now = host_time()
+    txt = Image.new('RGBA', device.size)
+    d = ImageDraw.Draw(txt)
+    d.text((0, 0), host_name, font=font16, fill='white')
+    d.line([(0, 13), (resolution[0], 13)])
+    d.text((0, 15), cpu_uptime(), font=font, fill='white')
+    d.text((0, 27), memory_usage(), font=font, fill='white')
+    d.text((0, 39), disk_usage('root', '/'), font=font, fill='white')
+    d.text((0, last), now, font=font, fill='white')
+    device.display(txt.convert(device.mode))
+
+
+#
+# Display the original system information
+#
+
+def display_information(device):
+    txt = Image.new('RGBA', device.size)
+    d = ImageDraw.Draw(txt)
+    d.text((0, 0), cpu_load(), font=font, fill='white')
+    d.line([(0, 13), (resolution[0], 13)])
+    d.text((0, 15), memory_usage(), font=font, fill='white')
+    d.text((0, 27), disk_usage(storage[0]['name'], storage[0]['path']), font=font, fill='white')
+    next_line = 39
+    if len(storage) > 1:
+        d.text((0, next_line), disk_usage(storage[1]['name'], storage[1]['path']), font=font, fill='white')
+        next_line = 51
+    d.text((0, next_line), network(interface), font=font, fill='white')
+    device.display(txt.convert(device.mode))
+
+
+#
+# Get the three onboard temperature sensors as floating point values
+#
+
+def get_temperatures():
+    with open('/dev/thermal-board/temp1_input') as board:
+        board_temperature = float(board.read()) / 1000.0
+    with open('/dev/thermal-cpu/temp1_input') as cpu:
+        cpu_temperature = float(cpu.read()) / 1000.0
+    with open('/dev/thermal-eth/temp1_input') as ethernet:
+        ethernet_temperature = float(ethernet.read()) / 1000.0
+    return [board_temperature, cpu_temperature, ethernet_temperature]
+
+
+#
+# Get the duty cycle of the two onboard fans
+#
+
+def get_fan_duty_cycles():
+    with open('/dev/fan-j10/pwm1') as fan1:
+        fan1_pwm = (float(fan1.read()) / 255.0) * 100.0
+    with open('/dev/fan-j17/pwm1') as fan2:
+        fan2_pwm = (float(fan2.read()) / 255.0) * 100.0
+    return [fan1_pwm, fan2_pwm]
+
+
+#
+# Display the status of the board
+#
+
+def board_status(device):
+
+    temperatures = get_temperatures()
+    board = convert_temperature(temperatures[0])
+    cpu = convert_temperature(temperatures[1])
+    interface = convert_temperature(temperatures[2])
+
+    fans = get_fan_duty_cycles()
+    fan1 = '{:.0f}%'.format(fans[0])
+    fan2 = '{:.0f}%'.format(fans[1])
+    fans = fan1 + ' / ' + fan2
+
+    now = host_time()
+
+    txt = Image.new('RGBA', device.size)
+    d = ImageDraw.Draw(txt)
+    d.text((0,   0),  'Board:',   font=font, fill='white')
+    d.text((40,  0),  board,      font=font, fill='white')
+    d.text((0,  12),  'CPU:',     font=font, fill='white')
+    d.text((40, 12),  cpu,        font=font, fill='white')
+    d.text((0,  24),  'PHY:',     font=font, fill='white')
+    d.text((40, 24),  interface,  font=font, fill='white')
+    d.text((0,  36),  'Fans:',    font=font, fill='white')
+    d.text((40, 36),  fans,       font=font, fill='white')
+    d.text((0, last), now,        font=font, fill='white')
+    device.display(txt.convert(device.mode))
+
+
+def storage_utilization(device):
+
+    temperatures = get_temperatures()
+    cpu = convert_temperature(temperatures[1])
+
+    now = host_time()
+
+    line = 15
+
+    txt = Image.new('RGBA', device.size)
+    d = ImageDraw.Draw(txt)
+    d.text((0, 0), 'Storage', font=font16, fill='white')
+    d.line([(0, 13), (resolution[0], 13)])
+    for entry in storage:
+        d.text((0, line), disk_usage(entry['name'], entry['path']), font=font, fill='white')
+        line = line + 12
+    device.display(txt.convert(device.mode))
+
+
+#
+# Display a logo
+#
+
+def display_logo(device, message):
+    img_path = os.path.abspath(os.path.join(os.path.dirname(__file__),
+                               '../share/sys-oled', logo_file))
+    logo = Image.open(img_path).convert('RGBA')
+
+    background = Image.new('RGBA', device.size)
     background.paste(logo, (0, 0))
 
     txt = Image.new('RGBA', device.size)
     d = ImageDraw.Draw(txt)
-    d.text((0,52), msg, font=font, fill="white")
+    d.text((0, last), host_name + ' ' + message, font=font, fill='white')
 
     out = Image.alpha_composite(background, txt)
     device.display(out.convert(device.mode))
+
 
 def sigterm_handler():
     sys.exit(0)
@@ -140,13 +499,40 @@ signal.signal(signal.SIGTERM, sigterm_handler)
 
 def main():
     while True:
-        display_info(device)
-        time.sleep(refresh)
-        if show_logo == "yes":
-            logo(device, host_time())
+
+        if show_logo:
+            display_logo(device, host_time())
             time.sleep(refresh / 2)
 
-if __name__ == "__main__":
+        if show_information:
+            display_information(device)
+            time.sleep(refresh)
+
+        if show_status:
+            system_status(device)
+            time.sleep(refresh)
+
+        if show_board:
+            board_status(device)
+            time.sleep(refresh)
+
+        if show_processor:
+            processor_status(device)
+            time.sleep(refresh)
+
+        if show_network:
+            network_utilization(device)
+            time.sleep(refresh)
+
+        if show_rates:
+            interface_rates(device)
+            time.sleep(refresh)
+
+        if show_storage:
+            storage_utilization(device)
+            time.sleep(refresh)
+
+if __name__ == '__main__':
     try:
         device = get_device()
         device.contrast(contrast)

@@ -1,5 +1,5 @@
 # Description
-Application to display Helios4 System Status on I2C OLED display.
+Application to display Helios4 System Status on I2C OLED display.  A variety or infomation displays are available.
 
 ![system status](capture/luma_000001.png)
 ![system time](capture/luma_000002.png)
@@ -45,16 +45,12 @@ sudo nano /etc/sys-oled.conf
 You can edit the following lines to define for which storage devices you want to display usage info.
 
 ```
-# Storage Device 1
-# Device name
-storage1_name = sd
-
-# Device mount path
-storage1_path = /
-
-# Storage Device 2
-storage2_name= md0
-storage2_path= /mnt/md0
+[storage]
+# Path followed by an optional, short descriptive name
+/          root
+/mnt/md0   backups
+/mnt/md1   work
+/mnt/md2   builds
 
 ```
 

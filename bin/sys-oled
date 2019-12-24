@@ -115,7 +115,7 @@ def bytes2human(n):
                 return '{}{}'.format(int(value), s)
             else:
                 return '{:.1f}{}'.format(value, s)
-    return '{}B'.format(n)
+    return '{}'.format(n)
 
 
 #
@@ -296,18 +296,24 @@ def network_traffic():
             dropin, dropout)
 
 
-net_max = 1000
+network_rate = [1000]
 
 def network_utilization(device):
-    global net_max
+    global network_rate
 
     traffic = network_traffic()
     txCount = traffic[0]
     rxCount = traffic[1]
-    net_max = max(net_max, txCount, rxCount)
+    current = max(txCount, rxCount)
+    if len(network_rate) > 10:
+        network_rate.pop(0)
+    network_rate.append(current)
 
-    txPercent = (txCount / net_max) * 100
-    rxPercent = (rxCount / net_max) * 100
+    actual_rate = sum(network_rate) / len(network_rate)
+    rate = math.pow(10, math.ceil(math.log10(actual_rate)))
+
+    txPercent = (txCount / rate) * 100
+    rxPercent = (rxCount / rate) * 100
 
     low = 24 + 1
     high = resolution[0]
@@ -324,7 +330,7 @@ def network_utilization(device):
     d.line([(24, 24), (tx, 24)], width=7)
     d.text((0, 30), 'Rx:', font=font, fill='white')
     d.line([(24, 36), (rx, 36)], width=7)
-    d.text((36, 41), '{:.0f} bytes'.format(net_max), font=font, fill='white')
+    d.text((36, 41), '{} Bytes'.format(bytes2human(int(rate))), font=font, fill='white')
     d.text((0, last), now, font=font, fill='white')
     device.display(txt.convert(device.mode))
 

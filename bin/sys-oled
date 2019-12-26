@@ -304,13 +304,15 @@ def network_utilization(device):
     traffic = network_traffic()
     txCount = traffic[0]
     rxCount = traffic[1]
-    current = max(txCount, rxCount)
+    current = max(txCount, rxCount, 1000)
     if len(network_rate) > 10:
         network_rate.pop(0)
     network_rate.append(current)
 
     actual_rate = sum(network_rate) / len(network_rate)
-    rate = math.pow(10, math.ceil(math.log10(actual_rate)))
+    rate = math.log10(actual_rate)
+    rate = math.ceil(rate)
+    rate = math.pow(10, rate)
 
     txPercent = (txCount / rate) * 100
     rxPercent = (rxCount / rate) * 100
